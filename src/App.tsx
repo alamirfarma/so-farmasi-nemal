@@ -25,6 +25,8 @@ export default function App() {
   // UI states
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
   const [showForm, setShowForm] = useState(true);
 
@@ -90,14 +92,10 @@ export default function App() {
   const filteredItems = useMemo(() => {
     if (!nama) return [];
     return allItems.filter(item => {
-      // Check if nama is included in penanggungjawab (untuk PJ berserikat)
       const pjLower = item.penanggungjawab.toLowerCase();
       const namaLower = nama.toLowerCase();
       const isPJMatch = pjLower.includes(namaLower);
-      
-      // Check if keluar gudang != 0 OR stok pelayanan > 0
       const hasStock = item.keluarGudang !== 0 || item.stokPelayanan > 0;
-      
       return isPJMatch && hasStock;
     });
   }, [allItems, nama]);
@@ -108,7 +106,7 @@ export default function App() {
       namaBarang: string;
       satuan: string;
       totalStokPelayanan: number;
-      items: ItemObat[]; // All items with this name (sorted for FIFO)
+      items: ItemObat[];
     }>();
 
     filteredItems.forEach(item => {
@@ -132,7 +130,6 @@ export default function App() {
   // Calculate stats based on grouped items
   const stats = useMemo(() => {
     const total = groupedItems.length;
-    // A group is filled if all its items are complete
     const filled = groupedItems.filter(group => {
       return group.items.every(item => isItemComplete(item, ruangan, entries));
     }).length;
@@ -171,43 +168,24 @@ export default function App() {
     }
   }, [sheet, bulan, loadData]);
 
-  // Handle value change for grouped items - distribute stok opname using FIFO (bottom-first)
+  // Handle value change - nilai bebas tanpa batasan stok
   const handleValueChange = useCallback((namaBarang: string, field: keyof PelayananValues, value: number | string) => {
     setEntries(prev => {
       const group = groupedItems.find(g => g.namaBarang === namaBarang);
       if (!group) return prev;
 
       const newEntries = { ...prev };
+      const firstItem = group.items[0];
 
-      if (field === 'stokOpname') {
-        // FIFO distribution: start from bottom (last item) to top (first item)
-        let remaining = typeof value === 'number' ? value : (value === '' ? 0 : parseFloat(value) || 0);
-        const sortedItems = [...group.items].reverse(); // Reverse for FIFO (bottom first)
+      // Simpan ke item pertama
+      const existing = newEntries[firstItem.row] || { barangKembali: '', bonSarana: '', stokOpname: '' };
+      newEntries[firstItem.row] = { ...existing, [field]: value };
 
-        sortedItems.forEach(item => {
-          if (remaining <= 0) {
-            // No more to distribute
-            const existing = newEntries[item.row] || { barangKembali: '', bonSarana: '', stokOpname: '' };
-            newEntries[item.row] = { ...existing, stokOpname: 0 };
-          } else {
-            const allocate = Math.min(remaining, item.stokPelayanan);
-            const existing = newEntries[item.row] || { barangKembali: '', bonSarana: '', stokOpname: '' };
-            newEntries[item.row] = { ...existing, stokOpname: allocate };
-            remaining -= allocate;
-          }
-        });
-      } else if (field === 'barangKembali' || field === 'bonSarana') {
-        // Barang Kembali & Bon Sarana only go to first item (top row)
-        const firstItem = group.items[0];
-        const existing = newEntries[firstItem.row] || { barangKembali: '', bonSarana: '', stokOpname: '' };
-        newEntries[firstItem.row] = { ...existing, [field]: value };
-
-        // Set other items to 0 for this field
-        group.items.slice(1).forEach(item => {
-          const existing = newEntries[item.row] || { barangKembali: '', bonSarana: '', stokOpname: '' };
-          newEntries[item.row] = { ...existing, [field]: 0 };
-        });
-      }
+      // Item lain (duplikat nama) set ke 0
+      group.items.slice(1).forEach(item => {
+        const existingOther = newEntries[item.row] || { barangKembali: '', bonSarana: '', stokOpname: '' };
+        newEntries[item.row] = { ...existingOther, [field]: 0 };
+      });
 
       // Save to local storage
       if (nama && ruangan && bulan && sheet) {
@@ -223,11 +201,12 @@ export default function App() {
       setToast({ message: 'Mohon lengkapi semua pilihan', type: 'warning' });
       return;
     }
+    setSubmitted(false);
     setShowForm(false);
   };
 
-  // Handle submit stok opname
-  const handleSubmit = async () => {
+  // Handle confirm dialog open
+  const handleConfirmOpen = () => {
     // Check for incomplete groups
     const incompleteGroups = groupedItems.filter(group => {
       return !group.items.every(item => isItemComplete(item, ruangan, entries));
@@ -241,7 +220,19 @@ export default function App() {
       return;
     }
 
-    // Prepare entries to submit - all items from all groups
+    const entriesToSubmit = filteredItems.filter(item => entries[item.row]);
+    if (entriesToSubmit.length === 0) {
+      setToast({ message: 'Semua barang sudah distok opname sebelumnya', type: 'success' });
+      return;
+    }
+
+    setShowConfirm(true);
+  };
+
+  // Handle actual submit after confirmation
+  const handleSubmit = async () => {
+    setShowConfirm(false);
+
     const entriesToSubmit = filteredItems
       .filter(item => entries[item.row])
       .map(item => {
@@ -253,11 +244,6 @@ export default function App() {
           stokOpname: entry.stokOpname,
         };
       });
-
-    if (entriesToSubmit.length === 0) {
-      setToast({ message: 'Semua barang sudah distok opname sebelumnya', type: 'success' });
-      return;
-    }
 
     setSubmitting(true);
     try {
@@ -271,11 +257,11 @@ export default function App() {
       });
       
       setToast({ message: 'Stok opname berhasil dikirim!', type: 'success' });
+      setSubmitted(true);
       clearData();
       
-      // Reload data to reflect changes
+      // Reload data tapi jangan reset entries agar nilai tetap tampil
       await loadData();
-      setEntries({});
     } catch (error) {
       setToast({
         message: error instanceof Error ? error.message : 'Gagal mengirim data',
@@ -289,6 +275,7 @@ export default function App() {
   // Reset to form
   const handleBack = () => {
     setShowForm(true);
+    setSubmitted(false);
   };
 
   return (
@@ -367,6 +354,19 @@ export default function App() {
               Kembali ke halaman sebelumnya
             </button>
 
+            {/* Banner submitted */}
+            {submitted && (
+              <div className="mb-4 p-4 bg-green-50 border border-green-300 rounded-xl flex items-center gap-3">
+                <svg className="w-6 h-6 text-green-600 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+                <div>
+                  <p className="font-semibold text-green-800">Stok opname berhasil dikirim</p>
+                  <p className="text-sm text-green-700">Data sudah tersimpan ke spreadsheet. Tombol kirim dinonaktifkan.</p>
+                </div>
+              </div>
+            )}
+
             {/* Stats */}
             <StatsCard 
               total={stats.total}
@@ -388,17 +388,14 @@ export default function App() {
                   Menampilkan {groupedItems.length} barang
                 </p>
                 {groupedItems.map(group => {
-                  // Get values from first item for display
                   const firstItem = group.items[0];
                   const currentValues = entries[firstItem.row] || { barangKembali: '', bonSarana: '', stokOpname: '' };
                   
-                  // Calculate total stok opname from all items in group
                   const totalStokOpname = group.items.reduce((sum, item) => {
                     const val = entries[item.row]?.stokOpname;
                     return sum + (typeof val === 'number' ? val : (val === '' ? 0 : parseFloat(val) || 0));
                   }, 0);
 
-                  // Check if group is complete
                   const isComplete = group.items.every(item => isItemComplete(item, ruangan, entries));
 
                   return (
@@ -414,6 +411,7 @@ export default function App() {
                       }}
                       isComplete={isComplete}
                       ruangan={ruangan as Ruangan}
+                      readOnly={submitted}
                       onValueChange={(field, value) => handleValueChange(group.namaBarang, field, value)}
                     />
                   );
@@ -424,8 +422,9 @@ export default function App() {
             {/* Submit Button */}
             {groupedItems.length > 0 && (
               <SubmitButton
-                onClick={handleSubmit}
+                onClick={handleConfirmOpen}
                 loading={submitting}
+                disabled={submitted}
                 pendingCount={stats.pending}
                 totalCount={stats.total}
               />
@@ -433,6 +432,64 @@ export default function App() {
           </>
         )}
       </main>
+
+      {/* Confirm Dialog */}
+      {showConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
+                <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900">Konfirmasi Pengiriman</h3>
+            </div>
+            <p className="text-gray-600 mb-2 text-sm">
+              Anda akan mengirim data stok opname untuk:
+            </p>
+            <div className="bg-gray-50 rounded-lg p-3 mb-5 text-sm space-y-1">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Jenis Barang</span>
+                <span className="font-medium text-gray-900">{sheet}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Penanggungjawab</span>
+                <span className="font-medium text-gray-900">{nama}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Ruangan</span>
+                <span className="font-medium text-gray-900">{ruangan === 'RJ' ? 'Rawat Jalan' : ruangan === 'RI' ? 'Rawat Inap' : 'Depo'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Bulan</span>
+                <span className="font-medium text-gray-900">{bulan}</span>
+              </div>
+              <div className="flex justify-between border-t border-gray-200 pt-1 mt-1">
+                <span className="text-gray-500">Jumlah Barang</span>
+                <span className="font-bold text-blue-700">{stats.filled} item</span>
+              </div>
+            </div>
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-5">
+              ⚠️ Setelah dikirim, tombol kirim akan dinonaktifkan. Pastikan semua data sudah benar.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="flex-1 py-2.5 px-4 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 transition-colors"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handleSubmit}
+                className="flex-1 py-2.5 px-4 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 active:bg-blue-800 transition-colors"
+              >
+                Ya, Kirim
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {toast && (
