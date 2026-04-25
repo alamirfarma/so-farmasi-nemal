@@ -8,6 +8,7 @@ interface ItemCardProps {
   currentValues: PelayananValues;
   isComplete: boolean;
   ruangan: Ruangan;
+  readOnly?: boolean;
   onValueChange: (field: keyof PelayananValues, value: number | string) => void;
 }
 
@@ -17,6 +18,7 @@ export const ItemCard: React.FC<ItemCardProps> = ({
   stokPelayanan,
   currentValues,
   isComplete,
+  readOnly = false,
   onValueChange,
 }) => {
   const [inputBarangKembali, setInputBarangKembali] = useState<string>('');
@@ -31,29 +33,34 @@ export const ItemCard: React.FC<ItemCardProps> = ({
   }, [currentValues]);
 
   const handleBlur = (field: keyof PelayananValues, value: string) => {
+    if (readOnly) return;
     const numValue = value === '' ? '' : parseFloat(value) || 0;
     onValueChange(field, numValue);
   };
 
   // Determine card status color
   const getStatusColor = (): string => {
+    if (readOnly && isComplete) {
+      return 'border-green-500 bg-green-50'; // Sudah dikirim
+    }
     if (isComplete) {
-      // Check if values came from current entries (will be submitted)
       const hasNewValues = inputBarangKembali !== '' || inputBonSarana !== '' || inputStokOpname !== '';
       if (hasNewValues) {
-        return 'border-blue-500 bg-blue-50'; // Ready to submit
+        return 'border-blue-500 bg-blue-50'; // Siap kirim
       }
-      return 'border-green-500 bg-green-50'; // Already in spreadsheet
+      return 'border-green-500 bg-green-50'; // Sudah ada di spreadsheet
     }
-    
-    // Partial or not filled
     const hasAnyValue = inputBarangKembali !== '' || inputBonSarana !== '' || inputStokOpname !== '';
     if (hasAnyValue) {
-      return 'border-orange-400 bg-orange-50'; // Partially filled
+      return 'border-orange-400 bg-orange-50'; // Sebagian terisi
     }
-    
-    return 'border-gray-300 bg-white'; // Not filled yet
+    return 'border-gray-300 bg-white'; // Belum diisi
   };
+
+  const inputClass = `w-full px-3 py-2 border border-gray-300 rounded-lg text-sm transition-colors
+    ${readOnly
+      ? 'bg-gray-100 text-gray-600 cursor-not-allowed'
+      : 'focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white'}`;
 
   return (
     <div className={`mb-3 p-4 rounded-lg border-2 ${getStatusColor()} transition-all`}>
@@ -87,10 +94,11 @@ export const ItemCard: React.FC<ItemCardProps> = ({
             type="number"
             inputMode="numeric"
             value={inputBarangKembali}
-            onChange={(e) => setInputBarangKembali(e.target.value)}
+            onChange={(e) => !readOnly && setInputBarangKembali(e.target.value)}
             onBlur={(e) => handleBlur('barangKembali', e.target.value)}
             placeholder="0"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+            readOnly={readOnly}
+            className={inputClass}
           />
         </div>
 
@@ -103,10 +111,11 @@ export const ItemCard: React.FC<ItemCardProps> = ({
             type="number"
             inputMode="numeric"
             value={inputBonSarana}
-            onChange={(e) => setInputBonSarana(e.target.value)}
+            onChange={(e) => !readOnly && setInputBonSarana(e.target.value)}
             onBlur={(e) => handleBlur('bonSarana', e.target.value)}
             placeholder="0"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+            readOnly={readOnly}
+            className={inputClass}
           />
         </div>
 
@@ -119,10 +128,11 @@ export const ItemCard: React.FC<ItemCardProps> = ({
             type="number"
             inputMode="numeric"
             value={inputStokOpname}
-            onChange={(e) => setInputStokOpname(e.target.value)}
+            onChange={(e) => !readOnly && setInputStokOpname(e.target.value)}
             onBlur={(e) => handleBlur('stokOpname', e.target.value)}
             placeholder="0"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+            readOnly={readOnly}
+            className={inputClass}
           />
         </div>
       </div>
@@ -133,7 +143,9 @@ export const ItemCard: React.FC<ItemCardProps> = ({
           <svg className="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
           </svg>
-          <span className="text-xs font-medium text-green-700">Lengkap</span>
+          <span className="text-xs font-medium text-green-700">
+            {readOnly ? 'Sudah dikirim' : 'Lengkap'}
+          </span>
         </div>
       )}
     </div>
