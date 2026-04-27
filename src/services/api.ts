@@ -42,6 +42,37 @@ export async function fetchData(sheet: SheetName, bulan: number): Promise<{
   }
 }
 
+export async function submitBarangKembali(payload: {
+  sheet: SheetName;
+  bulan: number;
+  ruangan: string;
+  entries: { row: number; barangKembali: number | string }[];
+}): Promise<{ success: boolean; message: string }> {
+  try {
+    const response = await fetch(APPS_SCRIPT_URL, {
+      method: 'POST',
+      redirect: 'follow',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'submitBarangKembali', ...payload }),
+    });
+
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch {
+      throw new Error('Invalid JSON response from server');
+    }
+    if (data.error) throw new Error(data.error);
+    return data;
+  } catch (error) {
+    if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+      throw new Error('Gagal terhubung ke server saat mengirim barang kembali.');
+    }
+    throw error;
+  }
+}
+
 export async function submitStokOpname(payload: {
   sheet: SheetName;
   bulan: number;
