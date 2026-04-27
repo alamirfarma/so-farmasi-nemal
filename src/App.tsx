@@ -7,7 +7,7 @@ import { Toast } from './components/Toast';
 import { SubmitButton } from './components/SubmitButton';
 import { StatsCard } from './components/StatsCard';
 import { useLocalStorage } from './hooks/useLocalStorage';
-import { fetchData, submitStokOpname } from './services/api';
+import { fetchData, submitBarangKembali, submitStokOpname } from './services/api';
 import { ItemObat, PelayananValues, BULAN_LIST, RUANGAN_LIST, SHEET_LIST, SheetName, Ruangan } from './types';
 
 export default function App() {
@@ -26,6 +26,8 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [submitStep, setSubmitStep] = useState<'idle' | 'phase1' | 'phase2'>('idle');
+  const [phase2Pending, setPhase2Pending] = useState<{ entries: { row: number; barangKembali: number | string; bonSarana: number | string; stokOpname: number | string }[] } | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
   const [showForm, setShowForm] = useState(true);
@@ -141,9 +143,9 @@ export default function App() {
     };
   }, [groupedItems, entries, ruangan, isItemComplete]);
 
-  // Load data when sheet and bulan change
-  const loadData = useCallback(async () => {
-    if (!sheet || !bulan) return;
+  // Load data when sheet and bulan change — returns fresh items so callers can use them directly
+  const loadData = useCallback(async (): Promise<ItemObat[]> => {
+    if (!sheet || !bulan) return [];
 
     setLoading(true);
     try {
@@ -152,11 +154,13 @@ export default function App() {
       
       setAllItems(data.items);
       setPenanggungjawabList(data.penanggungjawabList);
+      return data.items;
     } catch (error) {
       setToast({ 
         message: error instanceof Error ? error.message : 'Gagal memuat data', 
         type: 'error' 
       });
+      return [];
     } finally {
       setLoading(false);
     }
@@ -229,10 +233,24 @@ export default function App() {
     setShowConfirm(true);
   };
 
-  // Handle actual submit after confirmation
+  // Helper: retry fungsi async sampai berhasil, dengan delay antar percobaan
+  const retryAsync = async <T,>(fn: () => Promise<T>, maxRetries = 5, delayMs = 3000): Promise<T> => {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (attempt === maxRetries) throw err;
+        await new Promise(res => setTimeout(res, delayMs));
+      }
+    }
+    throw new Error('Retry gagal');
+  };
+
+  // Handle actual submit after confirmation - 2 tahap
   const handleSubmit = async () => {
     setShowConfirm(false);
 
+    const bulanIndex = BULAN_LIST.indexOf(bulan);
     const entriesToSubmit = filteredItems
       .filter(item => entries[item.row])
       .map(item => {
@@ -246,29 +264,111 @@ export default function App() {
       });
 
     setSubmitting(true);
+
+    // ── TAHAP 1: Kirim Barang Kembali ──
     try {
-      const bulanIndex = BULAN_LIST.indexOf(bulan);
-      
-      await submitStokOpname({
+      setSubmitStep('phase1');
+      await submitBarangKembali({
         sheet: sheet as SheetName,
         bulan: bulanIndex,
         ruangan,
-        entries: entriesToSubmit,
+        entries: entriesToSubmit.map(e => ({ row: e.row, barangKembali: e.barangKembali })),
       });
-      
-      setToast({ message: 'Stok opname berhasil dikirim!', type: 'success' });
-      setSubmitted(true);
-      clearData();
-      
-      // Reload data tapi jangan reset entries agar nilai tetap tampil
-      await loadData();
     } catch (error) {
       setToast({
-        message: error instanceof Error ? error.message : 'Gagal mengirim data',
+        message: 'Gagal mengirim data barang kembali. Silakan coba submit kembali.',
+        type: 'error',
+      });
+      setSubmitting(false);
+      setSubmitStep('idle');
+      return; // Berhenti, tidak lanjut ke tahap 2
+    }
+
+    // Ambil ulang data agar stok pelayanan terbaru (sudah + barang kembali) tersedia
+    const freshItems = await loadData();
+
+    // Hitung distribusi FIFO terbalik untuk stok opname menggunakan stok pelayanan terbaru
+    // Baris paling bawah diisi dulu, sisa mengalir ke atas; kelebihan ditumpuk di baris pertama
+    const distributeStokOpname = (
+      groupItems: ItemObat[],
+      totalStokOpname: number | string,
+      freshData: ItemObat[]
+    ) => {
+      const total = typeof totalStokOpname === 'number'
+        ? totalStokOpname
+        : (totalStokOpname === '' ? 0 : parseFloat(String(totalStokOpname)) || 0);
+
+      // Ambil stok pelayanan terbaru per row dari freshData
+      const itemsWithFreshStock = groupItems.map(item => {
+        const fresh = freshData.find(f => f.row === item.row);
+        return { row: item.row, stokPelayanan: fresh ? fresh.stokPelayanan : item.stokPelayanan };
+      });
+
+      // FIFO terbalik: isi dari baris paling bawah
+      const reversed = [...itemsWithFreshStock].reverse();
+      let remaining = total;
+      const result: Record<number, number> = {};
+
+      reversed.forEach((item, idx) => {
+        if (idx < reversed.length - 1) {
+          // Baris bawah: isi sebesar stok pelayanannya, sisanya lanjut ke atas
+          const allocated = Math.min(remaining, item.stokPelayanan);
+          result[item.row] = allocated;
+          remaining -= allocated;
+        } else {
+          // Baris paling atas (terakhir setelah reverse): tampung semua sisa
+          result[item.row] = remaining;
+          remaining = 0;
+        }
+      });
+
+      return result;
+    };
+
+    // Bangun entriesToSubmitPhase2 dengan distribusi FIFO terbalik untuk stok opname
+    const entriesToSubmitPhase2 = groupedItems.flatMap(group => {
+      const firstEntry = entries[group.items[0].row];
+      if (!firstEntry) return [];
+
+      const bonSarana = firstEntry.bonSarana;
+      const totalStokOpname = firstEntry.stokOpname;
+
+      const stokOpnameDistributed = distributeStokOpname(group.items, totalStokOpname, freshItems);
+
+      return group.items.map((item, idx) => ({
+        row: item.row,
+        barangKembali: idx === 0 ? firstEntry.barangKembali : 0,
+        bonSarana: idx === 0 ? bonSarana : 0,
+        stokOpname: stokOpnameDistributed[item.row] ?? 0,
+      }));
+    }).filter(e => entries[e.row] !== undefined || e.stokOpname !== 0);
+
+    // ── TAHAP 2: Kirim Bon Sarana + Stok Opname (dengan retry otomatis) ──
+    try {
+      setSubmitStep('phase2');
+      setPhase2Pending({ entries: entriesToSubmitPhase2 });
+
+      await retryAsync(() => submitStokOpname({
+        sheet: sheet as SheetName,
+        bulan: bulanIndex,
+        ruangan,
+        entries: entriesToSubmitPhase2,
+      }));
+
+      setToast({ message: 'Stok opname berhasil dikirim!', type: 'success' });
+      setSubmitted(true);
+      setPhase2Pending(null);
+      clearData();
+      await loadData();
+    } catch (error) {
+      // Retry habis, tampilkan pesan — tahap 1 sudah tersimpan
+      setToast({
+        message: 'Barang kembali sudah tersimpan, tapi bon sarana & stok opname gagal dikirim setelah beberapa percobaan. Silakan buka halaman ini kembali dan submit ulang.',
         type: 'error',
       });
     } finally {
       setSubmitting(false);
+      setSubmitStep('idle');
     }
   };
 
@@ -427,6 +527,7 @@ export default function App() {
                 disabled={submitted}
                 pendingCount={stats.pending}
                 totalCount={stats.total}
+                submitStep={submitStep}
               />
             )}
           </>
