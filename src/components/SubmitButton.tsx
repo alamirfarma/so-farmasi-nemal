@@ -6,6 +6,7 @@ interface SubmitButtonProps {
   disabled?: boolean;
   pendingCount: number;
   totalCount: number;
+  submitStep?: 'idle' | 'phase1' | 'phase2';
 }
 
 export const SubmitButton: React.FC<SubmitButtonProps> = ({
@@ -14,8 +15,15 @@ export const SubmitButton: React.FC<SubmitButtonProps> = ({
   disabled = false,
   pendingCount,
   totalCount,
+  submitStep = 'idle',
 }) => {
   const isDisabled = disabled || loading || pendingCount > 0;
+
+  const loadingLabel = submitStep === 'phase1'
+    ? 'Mengirim barang kembali...'
+    : submitStep === 'phase2'
+    ? 'Mengirim bon sarana & stok opname...'
+    : 'Mengirim...';
 
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 p-4 shadow-lg">
@@ -36,7 +44,7 @@ export const SubmitButton: React.FC<SubmitButtonProps> = ({
           {loading ? (
             <>
               <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-              Mengirim...
+              {loadingLabel}
             </>
           ) : disabled ? (
             <>
